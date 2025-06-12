@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
+const cacheService = require('./services/cacheService'); // Add this
 
 const app = express();
 
@@ -18,10 +19,41 @@ if (process.env.NODE_ENV === 'development' || process.env.NODE_ENV === undefined
 }
 
 // Health Check Endpoint
-app.get('/health', (req, res) => {
+app.get('/health', async (req, res) => { // Make it async
+  let redisStatus = 'unavailable';
+  try {
+    // Check if redisClient itself is connected, direct check before set/get
+    if (cacheService.redisClient && cacheService.redisClient.status === 'ready') {
+      const testKey = 'health_check_test';
+      const testValue = { timestamp: new Date().toISOString() };
+      const setResult = await cacheService.set(testKey, testValue, 60); // Set with 1 min expiry
+      if (!setResult) {
+        throw new Error('Failed to set test key in Redis.');
+      }
+      const retrievedValue = await cacheService.get(testKey);
+      if (retrievedValue && retrievedValue.timestamp === testValue.timestamp) {
+        redisStatus = 'ok';
+      } else {
+        redisStatus = 'set_get_mismatch'; // More specific error
+        console.warn('Redis health check: SET/GET mismatch.', { testValue, retrievedValue });
+      }
+      await cacheService.del(testKey); // Clean up
+    } else if (cacheService.redisClient && cacheService.redisClient.status === 'uninitialized_error') {
+      redisStatus = 'initialization_failed';
+    } else if (cacheService.redisClient) {
+      redisStatus = `client_status_${cacheService.redisClient.status}`; // e.g. connecting, reconnecting, end
+    }
+  } catch (error) {
+    console.error('Health check Redis error:', error);
+    redisStatus = `error: ${error.message || 'unknown_error'}`;
+  }
+
   res.status(200).json({
     status: 'ok',
     timestamp: new Date().toISOString(),
+    dependencies: {
+      redis: redisStatus,
+    },
   });
 });
 
